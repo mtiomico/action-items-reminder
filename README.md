@@ -15,3 +15,12 @@ I wanted a simple tool that mirrors real operational work: tracking action items
 2. In Terminal, go to the folder:
    ```bash
    cd path/to/action-items-reminder
+
+## Email reminders (optional)
+This tool can send reminder emails via SMTP.
+
+1) Create a `.env` file (do NOT commit it) based on `.env.example`
+2) Recommended: Gmail App Passwords (requires 2-step verification)
+3) Run:
+```bash
+python3 remind.py
