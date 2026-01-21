@@ -1,29 +1,33 @@
 import csv
+import os
+import smtplib
 from datetime import datetime, date
+from email.message import EmailMessage
 
 DATE_FORMAT = "%Y-%m-%d"
+DEFAULT_CSV = "action_items.csv"
 
 def parse_date(value: str) -> date:
     return datetime.strptime(value.strip(), DATE_FORMAT).date()
 
-def main():
-    filename = "action_items.csv"
-    today = date.today()
-
-    try:
-        with open(filename, newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            items = list(reader)
-    except FileNotFoundError:
-        print(f"ERROR: Could not find '{filename}'. Make sure it's in the same folder as remind.py")
+def load_env_file(env_path: str = ".env") -> None:
+    """
+    Minimal .env loader so we don't rely on external packages.
+    Lines like KEY=VALUE. Ignores blanks and comments.
+    """
+    if not os.path.exists(env_path):
         return
+    with open(env_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip())
 
-    if not items:
-        print("No action items found.")
-        return
-
-    print(f"Action Item Reminders (Today: {today.isoformat()})")
-    print("-" * 60)
+def build_reminders(items: list[dict], today: date) -> tuple[list[str], list[str]]:
+    due_soon = []
+    overdue = []
 
     for row in items:
         title = (row.get("title") or "").strip()
@@ -32,25 +36,120 @@ def main():
         status = (row.get("status") or "").strip().lower()
 
         if not title or not owner or not due:
-            print("Skipping row with missing required fields (title/owner/due_date).")
             continue
 
         try:
             due_date = parse_date(due)
         except ValueError:
-            print(f"Skipping '{title}' — invalid due_date '{due}'. Use YYYY-MM-DD.")
+            continue
+
+        # Skip completed items
+        if status in ("done", "closed", "complete", "completed"):
             continue
 
         days_left = (due_date - today).days
 
-        # Only remind for open/in-progress items
-        if status in ("done", "closed", "complete", "completed"):
-            continue
+        line = f"- {title} (Owner: {owner}, Due: {due})"
 
         if days_left < 0:
-            print(f"OVERDUE ({abs(days_left)} days): {title} | Owner: {owner} | Due: {due}")
+            overdue.append(f"{line} — OVERDUE by {abs(days_left)} day(s)")
         elif days_left <= 3:
-            print(f"DUE SOON ({days_left} days): {title} | Owner: {owner} | Due: {due}")
+            due_soon.append(f"{line} — Due in {days_left} day(s)")
+
+    return due_soon, overdue
+
+def send_email(subject: str, body: str) -> None:
+    smtp_host = os.getenv("SMTP_HOST")
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user = os.getenv("SMTP_USER")
+    smtp_pass = os.getenv("SMTP_PASS")
+
+    email_from = os.getenv("EMAIL_FROM", smtp_user or "")
+    email_to = os.getenv("EMAIL_TO", "")
+    recipients = [e.strip() for e in email_to.split(",") if e.strip()]
+
+    if not (smtp_host and smtp_user and smtp_pass and email_from and recipients):
+        raise ValueError(
+            "Missing email configuration. Check SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS and EMAIL_FROM/EMAIL_TO in .env"
+        )
+
+    msg = EmailMessage()
+    msg["From"] = email_from
+    msg["To"] = ", ".join(recipients)
+    msg["Subject"] = subject
+    msg.set_content(body)
+
+    # STARTTLS (common for Gmail)
+    with smtplib.SMTP(smtp_host, smtp_port) as server:
+        server.ehlo()
+        server.starttls()
+        server.ehlo()
+        server.login(smtp_user, smtp_pass)
+        server.send_message(msg)
+
+def main() -> None:
+    load_env_file(".env")
+
+    filename = os.getenv("CSV_FILE", DEFAULT_CSV)
+    today = date.today()
+
+    try:
+        with open(filename, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            items = list(reader)
+    except FileNotFoundError:
+        print(f"ERROR: Could not find '{filename}'. Put it next to remind.py or set CSV_FILE in .env")
+        return
+
+    due_soon, overdue = build_reminders(items, today)
+
+    # Always print to console for visibility
+    print(f"Action Item Reminders (Today: {today.isoformat()})")
+    print("-" * 60)
+    if not due_soon and not overdue:
+        print("No due-soon or overdue action items. ✅")
+        return
+
+    if overdue:
+        print("OVERDUE:")
+        for x in overdue:
+            print(x)
+        print()
+
+    if due_soon:
+        print("DUE SOON (<= 3 days):")
+        for x in due_soon:
+            print(x)
+        print()
+
+    # Email body
+    subject = os.getenv("EMAIL_SUBJECT", "Action Item Reminders")
+    body_lines = [
+        f"Action Item Reminders — {today.isoformat()}",
+        "",
+    ]
+
+    if overdue:
+        body_lines.append("OVERDUE")
+        body_lines.extend(overdue)
+        body_lines.append("")
+
+    if due_soon:
+        body_lines.append("DUE SOON (<= 3 days)")
+        body_lines.extend(due_soon)
+        body_lines.append("")
+
+    body_lines.append("—")
+    body_lines.append("Generated by action-items-reminder tool")
+
+    body = "\n".join(body_lines)
+
+    try:
+        send_email(subject, body)
+        print("Email sent successfully. 📩")
+    except Exception as e:
+        print(f"Email send failed: {e}")
 
 if __name__ == "__main__":
     main()
+
